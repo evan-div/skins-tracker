@@ -205,6 +205,76 @@ function burstConfetti(x, y) {
   }
 }
 
+// ---- Score picker ----
+// A tap-to-pick popup instead of a text input, so entering a score never
+// summons the mobile keyboard. 1-9 covers the vast majority of holes;
+// the poop emoji is a stand-in for "double digits, just move on" (stored
+// as a sentinel value that's always worse than any real score entered).
+
+const POOP_SCORE = 10
+
+function formatScore(value) {
+  if (value == null) return '–'
+  return value === POOP_SCORE ? '💩' : String(value)
+}
+
+let currentPicker = null
+
+function closeScorePicker() {
+  if (!currentPicker) return
+  currentPicker.backdrop.remove()
+  currentPicker.picker.remove()
+  currentPicker = null
+}
+
+function openScorePicker(anchorEl, currentValue, onSelect) {
+  closeScorePicker()
+
+  const backdrop = el('div', { class: 'score-picker-backdrop' })
+  backdrop.onclick = closeScorePicker
+  document.body.appendChild(backdrop)
+
+  const picker = el('div', { class: 'score-picker' })
+  const grid = el('div', { class: 'score-picker-grid' })
+  const options = [1, 2, 3, 4, 5, 6, 7, 8, 9, POOP_SCORE]
+  options.forEach((value) => {
+    const isPoop = value === POOP_SCORE
+    const btn = el('button', {
+      type: 'button',
+      class: `score-picker-btn${currentValue === value ? ' selected' : ''}`,
+    }, [isPoop ? '💩' : String(value)])
+    btn.onclick = (e) => {
+      e.stopPropagation()
+      closeScorePicker()
+      onSelect(value)
+    }
+    grid.appendChild(btn)
+  })
+  picker.appendChild(grid)
+
+  const clearBtn = el('button', { type: 'button', class: 'score-picker-clear' }, ['Clear'])
+  clearBtn.onclick = (e) => {
+    e.stopPropagation()
+    closeScorePicker()
+    onSelect(null)
+  }
+  picker.appendChild(clearBtn)
+
+  document.body.appendChild(picker)
+
+  const rect = anchorEl.getBoundingClientRect()
+  const pw = picker.offsetWidth
+  const ph = picker.offsetHeight
+  let left = rect.left + rect.width / 2 - pw / 2
+  left = Math.max(8, Math.min(left, window.innerWidth - pw - 8))
+  let top = rect.bottom + 8
+  if (top + ph > window.innerHeight - 8) top = rect.top - ph - 8
+  picker.style.left = `${left}px`
+  picker.style.top = `${top}px`
+
+  currentPicker = { backdrop, picker }
+}
+
 // ---- DOM helpers ----
 
 function el(tag, props = {}, children = []) {
@@ -229,6 +299,7 @@ let activeCode = null
 let unsubscribeActive = null
 
 function stopActiveSubscription() {
+  closeScorePicker()
   if (unsubscribeActive) {
     unsubscribeActive()
     unsubscribeActive = null
@@ -538,7 +609,7 @@ function mountRoundView(code) {
   let built = false
   let potCells = []
   let skinCells = []
-  let scoreInputs = [] // scoreInputs[h][pi]
+  let scoreButtons = [] // scoreButtons[h][pi]
   let previousWinnerIds = [] // per hole, so we only confetti *new* skin winners
   let firstSnapshot = true // don't confetti pre-existing winners on initial load
 
@@ -564,32 +635,28 @@ function mountRoundView(code) {
     const tbody = el('tbody')
     potCells = []
     skinCells = []
-    scoreInputs = []
+    scoreButtons = []
 
     for (let h = 0; h < round.holeCount; h++) {
       const tr = el('tr', {}, [el('td', {}, [String(h + 1)])])
-      const rowInputs = []
+      const rowButtons = []
 
       round.players.forEach((p, pi) => {
         const td = el('td')
         const value = getScore(round, h, pi)
-        const input = el('input', {
-          type: 'number',
-          min: '1',
-          class: 'score-input',
-          value: value != null ? String(value) : '',
-        })
-        input.oninput = () => {
-          const raw = input.value
-          const numeric = raw === '' ? null : Number(raw)
-          updateDoc(doc(db, 'rounds', code), { [`scores.${scoreKey(h, pi)}`]: numeric })
-            .then(clearStatus)
-            .catch((err) => {
-              showStatus('Could not save that score — check your connection: ' + err.message)
-            })
+        const scoreBtn = el('button', { type: 'button', class: 'score-btn' }, [formatScore(value)])
+        scoreBtn._score = value
+        scoreBtn.onclick = () => {
+          openScorePicker(scoreBtn, scoreBtn._score, (numeric) => {
+            updateDoc(doc(db, 'rounds', code), { [`scores.${scoreKey(h, pi)}`]: numeric })
+              .then(clearStatus)
+              .catch((err) => {
+                showStatus('Could not save that score — check your connection: ' + err.message)
+              })
+          })
         }
-        rowInputs.push(input)
-        td.appendChild(input)
+        rowButtons.push(scoreBtn)
+        td.appendChild(scoreBtn)
         tr.appendChild(td)
       })
 
@@ -599,7 +666,7 @@ function mountRoundView(code) {
       tr.appendChild(skinCell)
       potCells.push(potCell)
       skinCells.push(skinCell)
-      scoreInputs.push(rowInputs)
+      scoreButtons.push(rowButtons)
       tbody.appendChild(tr)
     }
     table.appendChild(tbody)
@@ -635,11 +702,10 @@ function mountRoundView(code) {
 
     round.players.forEach((p, pi) => {
       for (let h = 0; h < round.holeCount; h++) {
-        const input = scoreInputs[h][pi]
-        if (document.activeElement === input) continue // don't clobber what the user is typing
+        const scoreBtn = scoreButtons[h][pi]
         const value = getScore(round, h, pi)
-        const strValue = value != null ? String(value) : ''
-        if (input.value !== strValue) input.value = strValue
+        scoreBtn._score = value
+        scoreBtn.textContent = formatScore(value)
       }
     })
 

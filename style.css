@@ -355,10 +355,80 @@ tbody td:first-child {
   padding-left: 10px;
 }
 
-.score-input {
+.score-btn {
   width: 44px;
+  height: 40px;
   text-align: center;
   padding: 6px 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.score-btn:active {
+  background: rgba(45, 106, 79, 0.12);
+}
+
+.score-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 40, 30, 0.35);
+  z-index: 1000;
+}
+
+.score-picker {
+  position: fixed;
+  z-index: 1001;
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+  width: 240px;
+}
+
+.score-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.score-picker-btn {
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.score-picker-btn.selected {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+}
+
+.score-picker-btn:active {
+  background: rgba(45, 106, 79, 0.15);
+}
+
+.score-picker-clear {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .skin-winner {
@@ -373,6 +443,6 @@ tbody td:first-child {
 
 @media (max-width: 420px) {
   .card { padding: 14px; }
-  .score-input { width: 38px; font-size: 13px; }
+  .score-btn { width: 38px; height: 36px; font-size: 14px; }
   thead th, tbody td { padding: 5px 4px; }
 }
