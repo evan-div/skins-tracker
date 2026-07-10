@@ -162,6 +162,49 @@ function money(n) {
   return `${sign}$${Math.abs(n)}`
 }
 
+// ---- Avatars ----
+
+const AVATAR_COLORS = ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#10b981', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
+
+function colorForName(name) {
+  let hash = 0
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length]
+}
+
+function initialsFor(name) {
+  const parts = name.trim().split(/\s+/)
+  return parts.slice(0, 2).map((w) => w[0]).join('').toUpperCase()
+}
+
+function avatarEl(name, size = 28) {
+  return el('div', {
+    class: 'avatar',
+    style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.4)}px;background:${colorForName(name)}`,
+  }, [initialsFor(name)])
+}
+
+// ---- Confetti ----
+
+const CONFETTI_COLORS = ['#f43f5e', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7']
+
+function burstConfetti(x, y) {
+  for (let i = 0; i < 14; i++) {
+    const piece = document.createElement('div')
+    piece.className = 'confetti-piece'
+    piece.style.left = `${x}px`
+    piece.style.top = `${y}px`
+    piece.style.background = CONFETTI_COLORS[i % CONFETTI_COLORS.length]
+    const angle = Math.random() * Math.PI * 2
+    const distance = 40 + Math.random() * 50
+    piece.style.setProperty('--dx', `${Math.cos(angle) * distance}px`)
+    piece.style.setProperty('--dy', `${Math.sin(angle) * distance - 30}px`)
+    piece.style.setProperty('--rot', `${Math.random() * 720 - 360}deg`)
+    document.body.appendChild(piece)
+    piece.addEventListener('animationend', () => piece.remove())
+  }
+}
+
 // ---- DOM helpers ----
 
 function el(tag, props = {}, children = []) {
@@ -496,6 +539,8 @@ function mountRoundView(code) {
   let potCells = []
   let skinCells = []
   let scoreInputs = [] // scoreInputs[h][pi]
+  let previousWinnerIds = [] // per hole, so we only confetti *new* skin winners
+  let firstSnapshot = true // don't confetti pre-existing winners on initial load
 
   function buildTable(round) {
     tableCard.innerHTML = ''
@@ -504,7 +549,12 @@ function mountRoundView(code) {
     thead.appendChild(
       el('tr', {}, [
         el('th', {}, ['Hole']),
-        ...round.players.map((p) => el('th', {}, [p.name])),
+        ...round.players.map((p) => el('th', {}, [
+          el('div', { style: 'display:flex;flex-direction:column;align-items:center;gap:3px' }, [
+            avatarEl(p.name, 20),
+            el('span', {}, [p.name]),
+          ]),
+        ])),
         el('th', {}, ['Pot']),
         el('th', {}, ['Skin']),
       ])
@@ -596,12 +646,18 @@ function mountRoundView(code) {
     const holeResults = computeHoleResults(round)
     const standings = computeStandings(round, holeResults)
 
+    const hasClearLeader = standings.length > 1 && standings[0].net > standings[1].net
+
     standingsBody.innerHTML = ''
-    standings.forEach((s) => {
+    standings.forEach((s, i) => {
       const netClass = s.net > 0 ? 'pos' : s.net < 0 ? 'neg' : 'zero'
+      const isLeader = i === 0 && hasClearLeader
       standingsBody.appendChild(
         el('div', { class: 'standings-row' }, [
-          el('div', { class: 'player-name' }, [s.player.name]),
+          el('div', { class: 'player-identity' }, [
+            avatarEl(s.player.name),
+            el('div', { class: 'player-name' }, [isLeader ? '👑 ' : '', s.player.name]),
+          ]),
           el('div', { class: 'stats' }, [
             el('span', { class: 'skins-count' }, [`${s.skinsWon} skin${s.skinsWon === 1 ? '' : 's'}`]),
             el('span', { class: `net ${netClass}` }, [money(s.net)]),
@@ -612,10 +668,18 @@ function mountRoundView(code) {
 
     holeResults.forEach((result, h) => {
       const winner = round.players.find((p) => p.id === result.winnerId)
+      const hadWinnerBefore = previousWinnerIds[h] != null
       potCells[h].textContent = `$${result.pot}`
       skinCells[h].textContent = winner ? winner.name : result.complete ? 'Carried' : '—'
       skinCells[h].className = winner ? 'skin-winner' : 'skin-carried'
+
+      if (winner && !hadWinnerBefore && !firstSnapshot) {
+        const rect = skinCells[h].getBoundingClientRect()
+        burstConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      }
+      previousWinnerIds[h] = result.winnerId
     })
+    firstSnapshot = false
 
     rememberRound(summaryOf(round))
   }
