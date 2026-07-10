@@ -1,7 +1,7 @@
 import { firebaseConfig } from './firebase-config.js'
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'
 import {
-  getFirestore,
+  initializeFirestore,
   doc,
   setDoc,
   getDoc,
@@ -11,7 +11,11 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js'
 
 const firebaseApp = initializeApp(firebaseConfig)
-const db = getFirestore(firebaseApp)
+// Many mobile carrier networks and in-app browsers (e.g. Messages' link
+// preview) block the persistent streaming connection Firestore prefers,
+// which otherwise causes a slow fallback-detection delay that reads as
+// "laggy". Forcing auto-detected long polling skips that delay.
+const db = initializeFirestore(firebaseApp, { experimentalAutoDetectLongPolling: true })
 
 // ---- Round codes ----
 
@@ -459,6 +463,20 @@ function renderNewRoundForm() {
 function mountRoundView(code) {
   stopActiveSubscription()
 
+  const statusBanner = el('div', {
+    class: 'card',
+    style: 'display:none;background:#fef2f2;color:#991b1b;font-size:13px;font-weight:700;padding:12px 16px',
+  })
+  app.appendChild(statusBanner)
+
+  function showStatus(message) {
+    statusBanner.textContent = message
+    statusBanner.style.display = 'block'
+  }
+  function clearStatus() {
+    statusBanner.style.display = 'none'
+  }
+
   const headerCard = el('div', { class: 'card' })
   app.appendChild(headerCard)
 
@@ -514,9 +532,11 @@ function mountRoundView(code) {
         input.oninput = () => {
           const raw = input.value
           const numeric = raw === '' ? null : Number(raw)
-          updateDoc(doc(db, 'rounds', code), { [`scores.${scoreKey(h, pi)}`]: numeric }).catch((err) => {
-            alert('Could not save score: ' + err.message)
-          })
+          updateDoc(doc(db, 'rounds', code), { [`scores.${scoreKey(h, pi)}`]: numeric })
+            .then(clearStatus)
+            .catch((err) => {
+              showStatus('Could not save that score — check your connection: ' + err.message)
+            })
         }
         rowInputs.push(input)
         td.appendChild(input)
@@ -600,21 +620,49 @@ function mountRoundView(code) {
     rememberRound(summaryOf(round))
   }
 
-  unsubscribeActive = onSnapshot(
-    doc(db, 'rounds', code),
-    (snap) => {
-      if (!snap.exists()) {
-        alert('This round was deleted.')
-        forgetRound(code)
-        goHome()
-        return
+  let unsubscribeSnapshot = null
+
+  function subscribe() {
+    if (unsubscribeSnapshot) unsubscribeSnapshot()
+    unsubscribeSnapshot = onSnapshot(
+      doc(db, 'rounds', code),
+      (snap) => {
+        if (!snap.exists()) {
+          showStatus('This round was deleted.')
+          forgetRound(code)
+          return
+        }
+        clearStatus()
+        updateFromRound(snap.data())
+      },
+      (err) => {
+        showStatus('Live connection lost, retrying: ' + err.message)
       }
-      updateFromRound(snap.data())
-    },
-    (err) => {
-      alert('Live connection lost: ' + err.message)
+    )
+  }
+
+  subscribe()
+
+  // iOS Safari (and in-app browsers like Messages' link preview) can freeze
+  // a page's network connections when backgrounded and not reliably resume
+  // them; force a fresh subscription whenever this round view becomes
+  // visible again rather than trusting the old one silently reconnected.
+  function handleVisibility() {
+    if (document.visibilityState === 'visible' && view === 'round' && activeCode === code) {
+      subscribe()
     }
-  )
+  }
+  document.addEventListener('visibilitychange', handleVisibility)
+
+  unsubscribeActive = () => {
+    if (unsubscribeSnapshot) unsubscribeSnapshot()
+    document.removeEventListener('visibilitychange', handleVisibility)
+  }
 }
+
+// Prevent the browser's native pull-to-refresh gesture from reloading the
+// page mid-round — Firestore already keeps the view live, and a full
+// reload was landing users on a stale/blank screen while reconnecting.
+document.body.style.overscrollBehaviorY = 'contain'
 
 render()
