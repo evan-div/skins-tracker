@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Anyone who has a round's code (the document ID) can read or write that
+// round — the code itself is the access control, like a Google Doc link.
+// Listing/querying the collection is blocked so codes can't be enumerated.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rounds/{roundCode} {
+      allow get, create, update, delete: if true;
+      allow list: if false;
+    }
+  }
+}

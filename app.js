@@ -1,10 +1,47 @@
-// ---- Storage ----
+import { firebaseConfig } from './firebase-config.js'
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js'
 
-const STORAGE_KEY = 'skinsTracker.rounds'
+const firebaseApp = initializeApp(firebaseConfig)
+const db = getFirestore(firebaseApp)
 
-function loadRounds() {
+// ---- Round codes ----
+
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' // no 0/O/1/I/L, avoids look-alikes
+const CODE_LENGTH = 5
+
+function generateCode() {
+  let code = ''
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]
+  }
+  return code
+}
+
+async function generateUniqueCode() {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateCode()
+    const snap = await getDoc(doc(db, 'rounds', code))
+    if (!snap.exists()) return code
+  }
+  throw new Error('Could not generate a unique round code, please try again.')
+}
+
+// ---- Recently opened rounds (local, per-device convenience list) ----
+
+const RECENTS_KEY = 'skinsTracker.recents'
+
+function loadRecents() {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
+    const raw = window.localStorage.getItem(RECENTS_KEY)
     const parsed = raw ? JSON.parse(raw) : []
     return Array.isArray(parsed) ? parsed : []
   } catch {
@@ -12,37 +49,66 @@ function loadRounds() {
   }
 }
 
-function saveRounds(rounds) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(rounds))
+function saveRecents(recents) {
+  window.localStorage.setItem(RECENTS_KEY, JSON.stringify(recents))
+}
+
+function rememberRound(summary) {
+  const recents = loadRecents().filter((r) => r.code !== summary.code)
+  recents.unshift(summary)
+  saveRecents(recents.slice(0, 20))
+}
+
+function forgetRound(code) {
+  saveRecents(loadRecents().filter((r) => r.code !== code))
+}
+
+function summaryOf(round) {
+  return {
+    code: round.code,
+    name: round.name,
+    holeCount: round.holeCount,
+    skinValue: round.skinValue,
+    playerCount: round.players.length,
+  }
 }
 
 // ---- Round model + scoring ----
 
-function createRound({ name, playerNames, holeCount, skinValue }) {
-  const players = playerNames.map((name, i) => ({ id: `p${i}-${Date.now()}`, name }))
+function scoreKey(hole, playerIndex) {
+  return `h${hole}_p${playerIndex}`
+}
+
+function getScore(round, hole, playerIndex) {
+  const v = round.scores ? round.scores[scoreKey(hole, playerIndex)] : null
+  return v == null ? null : v
+}
+
+function buildRound({ code, name, playerNames, holeCount, skinValue }) {
+  const players = playerNames.map((name, i) => ({ id: `p${i}`, name }))
   return {
-    id: `round-${Date.now()}`,
+    code,
     name,
     createdAt: Date.now(),
     players,
     holeCount,
     skinValue,
-    scores: Array.from({ length: holeCount }, () => players.map(() => null)),
+    scores: {},
   }
 }
 
 /**
  * Walks the round hole by hole. Each player antes `skinValue` every hole.
  * A tie for low score carries the whole pot to the next hole; a solo low
- * score takes it. Net payouts across all players always sum to zero.
+ * score takes it. Net payouts across all players always sum to zero
+ * (unless the round ends with an unresolved carry still on the table).
  */
 function computeHoleResults(round) {
   const results = []
   let carryPot = 0
 
   for (let h = 0; h < round.holeCount; h++) {
-    const holeScores = round.scores[h] || []
-    const complete = round.players.length > 0 && round.players.every((_, i) => holeScores[i] != null)
+    const complete = round.players.length > 0 && round.players.every((_, i) => getScore(round, h, i) != null)
     const pot = carryPot + round.skinValue * round.players.length
 
     if (!complete) {
@@ -50,8 +116,8 @@ function computeHoleResults(round) {
       continue
     }
 
-    const min = Math.min(...round.players.map((_, i) => holeScores[i]))
-    const lowPlayers = round.players.filter((_, i) => holeScores[i] === min)
+    const min = Math.min(...round.players.map((_, i) => getScore(round, h, i)))
+    const lowPlayers = round.players.filter((_, i) => getScore(round, h, i) === min)
 
     if (lowPlayers.length === 1) {
       results.push({ pot, winnerId: lowPlayers[0].id, complete: true })
@@ -73,8 +139,7 @@ function computeStandings(round, holeResults) {
     skinsWon[p.id] = 0
   }
 
-  round.scores.forEach((holeScores, h) => {
-    const result = holeResults[h]
+  holeResults.forEach((result) => {
     if (!result.complete) return
     for (const p of round.players) net[p.id] -= round.skinValue
     if (result.winnerId) {
@@ -88,24 +153,12 @@ function computeStandings(round, holeResults) {
     .sort((a, b) => b.net - a.net)
 }
 
-// ---- UI ----
-
-const app = document.getElementById('app')
-const backBtn = document.getElementById('backBtn')
-const deleteBtn = document.getElementById('deleteBtn')
-
-let rounds = loadRounds()
-let activeId = null
-let creating = false
-
-function persist() {
-  saveRounds(rounds)
-}
-
 function money(n) {
   const sign = n > 0 ? '+' : n < 0 ? '−' : ''
   return `${sign}$${Math.abs(n)}`
 }
+
+// ---- DOM helpers ----
 
 function el(tag, props = {}, children = []) {
   const node = document.createElement(tag)
@@ -118,48 +171,90 @@ function el(tag, props = {}, children = []) {
   return node
 }
 
+// ---- App state ----
+
+const app = document.getElementById('app')
+const backBtn = document.getElementById('backBtn')
+const deleteBtn = document.getElementById('deleteBtn')
+
+let view = 'list' // 'list' | 'creating' | 'joining' | 'round'
+let activeCode = null
+let unsubscribeActive = null
+
+function stopActiveSubscription() {
+  if (unsubscribeActive) {
+    unsubscribeActive()
+    unsubscribeActive = null
+  }
+}
+
+function goHome() {
+  stopActiveSubscription()
+  activeCode = null
+  view = 'list'
+  render()
+}
+
 function render() {
   app.innerHTML = ''
-  const activeRound = rounds.find((r) => r.id === activeId) || null
+  backBtn.hidden = view !== 'round'
+  deleteBtn.hidden = view !== 'round'
+  backBtn.onclick = goHome
+  deleteBtn.onclick = () => handleDelete()
 
-  backBtn.hidden = !activeRound
-  deleteBtn.hidden = !activeRound
-  backBtn.onclick = () => { activeId = null; render() }
-  deleteBtn.onclick = () => {
-    if (!activeRound) return
-    if (!confirm(`Delete "${activeRound.name}"? This can't be undone.`)) return
-    rounds = rounds.filter((r) => r.id !== activeRound.id)
-    activeId = null
-    persist()
-    render()
-  }
-
-  if (activeRound) {
-    renderRound(activeRound)
-  } else if (creating) {
+  if (view === 'round' && activeCode) {
+    mountRoundView(activeCode)
+  } else if (view === 'creating') {
     renderNewRoundForm()
+  } else if (view === 'joining') {
+    renderJoinForm()
   } else {
     renderRoundList()
   }
 }
 
-function renderRoundList() {
-  const startBtn = el('button', { class: 'primary', onclick: () => { creating = true; render() } }, ['+ New Round'])
-  app.appendChild(startBtn)
+async function handleDelete() {
+  if (!activeCode) return
+  if (!confirm('Delete this round for everyone? This can\'t be undone.')) return
+  const code = activeCode
+  try {
+    await deleteDoc(doc(db, 'rounds', code))
+  } catch (err) {
+    alert('Could not delete round: ' + err.message)
+    return
+  }
+  forgetRound(code)
+  goHome()
+}
 
-  if (rounds.length === 0) {
-    app.appendChild(el('div', { class: 'empty-state' }, ["No rounds yet. Start one to track skins with your friends."]))
+// ---- List view ----
+
+function renderRoundList() {
+  app.appendChild(
+    el('button', { class: 'primary', onclick: () => { view = 'creating'; render() } }, ['+ New Round'])
+  )
+  app.appendChild(
+    el('button', {
+      class: 'ghost-btn light',
+      style: 'width:100%;padding:12px;font-size:14px',
+      onclick: () => { view = 'joining'; render() },
+    }, ['Join a round with a code'])
+  )
+
+  const recents = loadRecents()
+  if (recents.length === 0) {
+    app.appendChild(el('div', { class: 'empty-state' }, ['No rounds yet. Start one, or join a friend\'s round with their code.']))
     return
   }
 
-  rounds.forEach((r) => {
+  recents.forEach((r) => {
     const item = el('button', {
       class: 'round-list-item',
-      onclick: () => { activeId = r.id; render() },
+      onclick: () => openRound(r.code),
     }, [
       el('div', {}, [
         el('div', { class: 'name' }, [r.name]),
-        el('div', { class: 'meta' }, [`${r.players.length} players · ${r.holeCount} holes · $${r.skinValue}/skin`]),
+        el('div', { class: 'meta' }, [`${r.playerCount} players · ${r.holeCount} holes · $${r.skinValue}/skin · code ${r.code}`]),
       ]),
       el('div', { style: 'color:#9ca3af' }, ['→']),
     ])
@@ -167,18 +262,99 @@ function renderRoundList() {
   })
 }
 
+async function openRound(code) {
+  const snap = await getDoc(doc(db, 'rounds', code)).catch((err) => {
+    alert('Could not open round: ' + err.message)
+    return null
+  })
+  if (!snap) return
+  if (!snap.exists()) {
+    alert(`Round "${code}" no longer exists.`)
+    forgetRound(code)
+    render()
+    return
+  }
+  activeCode = code
+  view = 'round'
+  render()
+}
+
+// ---- Join form ----
+
+function renderJoinForm() {
+  const card = el('form', { class: 'card' })
+  card.appendChild(el('h2', {}, ['Join a Round']))
+  card.appendChild(el('label', { class: 'field-label' }, ['Enter the round code your friend shared']))
+  const codeInput = el('input', {
+    type: 'text',
+    placeholder: 'e.g. 7F3K2',
+    style: 'text-transform:uppercase;letter-spacing:2px;font-weight:800;text-align:center;font-size:20px',
+    maxlength: String(CODE_LENGTH),
+  })
+  card.appendChild(codeInput)
+
+  const errorBox = el('div', { class: 'error-text', style: 'margin-top:10px;display:none' })
+  card.appendChild(errorBox)
+
+  const actions = el('div', { class: 'form-actions', style: 'margin-top:14px' })
+  const submitBtn = el('button', { type: 'submit', class: 'primary' }, ['Join'])
+  const cancelBtn = el('button', {
+    type: 'button',
+    class: 'ghost-btn light',
+    style: 'flex:1',
+    onclick: goHome,
+  }, ['Cancel'])
+  actions.appendChild(el('div', { style: 'flex:1' }, [submitBtn]))
+  actions.appendChild(cancelBtn)
+  card.appendChild(actions)
+
+  card.onsubmit = async (e) => {
+    e.preventDefault()
+    const code = codeInput.value.trim().toUpperCase()
+    if (code.length !== CODE_LENGTH) {
+      errorBox.textContent = `Codes are ${CODE_LENGTH} characters.`
+      errorBox.style.display = 'block'
+      return
+    }
+    submitBtn.disabled = true
+    submitBtn.textContent = 'Joining…'
+    try {
+      const snap = await getDoc(doc(db, 'rounds', code))
+      if (!snap.exists()) {
+        errorBox.textContent = `No round found with code "${code}".`
+        errorBox.style.display = 'block'
+        submitBtn.disabled = false
+        submitBtn.textContent = 'Join'
+        return
+      }
+      const round = snap.data()
+      rememberRound(summaryOf(round))
+      activeCode = code
+      view = 'round'
+      render()
+    } catch (err) {
+      errorBox.textContent = 'Could not reach the server: ' + err.message
+      errorBox.style.display = 'block'
+      submitBtn.disabled = false
+      submitBtn.textContent = 'Join'
+    }
+  }
+
+  app.appendChild(card)
+}
+
+// ---- New round form ----
+
 function renderNewRoundForm() {
   let playerNames = ['', '', '', '']
   let holeCount = 18
   let skinValue = 5
 
   const card = el('form', { class: 'card' })
-  const title = el('h2', {}, ['New Round'])
-  card.appendChild(title)
+  card.appendChild(el('h2', {}, ['New Round']))
 
-  const nameLabel = el('label', { class: 'field-label' }, ['Round name'])
+  card.appendChild(el('label', { class: 'field-label' }, ['Round name']))
   const nameInput = el('input', { placeholder: 'Saturday at Pebble', type: 'text' })
-  card.appendChild(nameLabel)
   card.appendChild(nameInput)
 
   const row = el('div', { class: 'field-row', style: 'margin-top:10px' })
@@ -203,8 +379,7 @@ function renderNewRoundForm() {
   row.appendChild(valueWrap)
   card.appendChild(row)
 
-  const playersLabel = el('label', { class: 'field-label', style: 'margin-top:14px' }, ['Players'])
-  card.appendChild(playersLabel)
+  card.appendChild(el('label', { class: 'field-label', style: 'margin-top:14px' }, ['Players']))
   const playersList = el('div')
   card.appendChild(playersList)
 
@@ -228,29 +403,23 @@ function renderNewRoundForm() {
   }
   renderPlayers()
 
-  const addPlayerBtn = el('button', {
+  card.appendChild(el('button', {
     type: 'button',
     class: 'add-player-btn',
     onclick: () => { playerNames.push(''); renderPlayers() },
-  }, ['+ Add player'])
-  card.appendChild(addPlayerBtn)
+  }, ['+ Add player']))
 
   const errorBox = el('div', { class: 'error-text', style: 'margin-top:10px;display:none' })
   card.appendChild(errorBox)
 
   const actions = el('div', { class: 'form-actions', style: 'margin-top:14px' })
   const submitBtn = el('button', { type: 'submit', class: 'primary' }, ['Start Round'])
-  const cancelBtn = el('button', {
-    type: 'button',
-    class: 'ghost-btn light',
-    style: 'flex:1',
-    onclick: () => { creating = false; render() },
-  }, ['Cancel'])
+  const cancelBtn = el('button', { type: 'button', class: 'ghost-btn light', style: 'flex:1', onclick: goHome }, ['Cancel'])
   actions.appendChild(el('div', { style: 'flex:1' }, [submitBtn]))
   actions.appendChild(cancelBtn)
   card.appendChild(actions)
 
-  card.onsubmit = (e) => {
+  card.onsubmit = async (e) => {
     e.preventDefault()
     const cleanNames = playerNames.map((p) => p.trim()).filter(Boolean)
     if (cleanNames.length < 2) {
@@ -258,28 +427,43 @@ function renderNewRoundForm() {
       errorBox.style.display = 'block'
       return
     }
-    const round = createRound({
-      name: nameInput.value.trim() || 'Untitled Round',
-      playerNames: cleanNames,
-      holeCount,
-      skinValue: Math.max(0, skinValue),
-    })
-    rounds = [round, ...rounds]
-    activeId = round.id
-    creating = false
-    persist()
-    render()
+    submitBtn.disabled = true
+    submitBtn.textContent = 'Starting…'
+    try {
+      const code = await generateUniqueCode()
+      const round = buildRound({
+        code,
+        name: nameInput.value.trim() || 'Untitled Round',
+        playerNames: cleanNames,
+        holeCount,
+        skinValue: Math.max(0, skinValue),
+      })
+      await setDoc(doc(db, 'rounds', code), round)
+      rememberRound(summaryOf(round))
+      activeCode = code
+      view = 'round'
+      render()
+    } catch (err) {
+      errorBox.textContent = 'Could not create round: ' + err.message
+      errorBox.style.display = 'block'
+      submitBtn.disabled = false
+      submitBtn.textContent = 'Start Round'
+    }
   }
 
   app.appendChild(card)
 }
 
-function renderRound(round) {
-  const headerCard = el('div', { class: 'card' }, [
-    el('h2', {}, [round.name]),
-    el('div', { class: 'meta' }, [`${round.holeCount} holes · $${round.skinValue}/skin`]),
-  ])
+// ---- Round view (live) ----
+
+function mountRoundView(code) {
+  stopActiveSubscription()
+
+  const headerCard = el('div', { class: 'card' })
   app.appendChild(headerCard)
+
+  const codeCard = el('div', { class: 'card', style: 'display:flex;align-items:center;justify-content:space-between;gap:10px' })
+  app.appendChild(codeCard)
 
   const standingsCard = el('div', { class: 'card' })
   standingsCard.appendChild(el('div', { class: 'section-label' }, ['Standings']))
@@ -288,64 +472,122 @@ function renderRound(round) {
   app.appendChild(standingsCard)
 
   const tableCard = el('div', { class: 'card table-card' })
-  const table = el('table')
-  const thead = el('thead')
-  const headRow = el('tr', {}, [el('th', {}, ['Hole']), ...round.players.map((p) => el('th', {}, [p.name])), el('th', {}, ['Pot']), el('th', {}, ['Skin'])])
-  thead.appendChild(headRow)
-  table.appendChild(thead)
-
-  const tbody = el('tbody')
-  const potCells = []
-  const skinCells = []
-
-  for (let h = 0; h < round.holeCount; h++) {
-    const tr = el('tr', {}, [el('td', {}, [String(h + 1)])])
-
-    round.players.forEach((p, pi) => {
-      const td = el('td')
-      const value = round.scores[h][pi]
-      const input = el('input', {
-        type: 'number',
-        min: '1',
-        class: 'score-input',
-        value: value != null ? String(value) : '',
-      })
-      input.oninput = () => {
-        const raw = input.value
-        round.scores[h][pi] = raw === '' ? null : Number(raw)
-        persist()
-        updateDerived()
-      }
-      td.appendChild(input)
-      tr.appendChild(td)
-    })
-
-    const potCell = el('td', { style: 'color:#6b7280' })
-    const skinCell = el('td')
-    tr.appendChild(potCell)
-    tr.appendChild(skinCell)
-    potCells.push(potCell)
-    skinCells.push(skinCell)
-    tbody.appendChild(tr)
-  }
-  table.appendChild(tbody)
-  tableCard.appendChild(table)
   app.appendChild(tableCard)
 
-  function updateDerived() {
+  let built = false
+  let potCells = []
+  let skinCells = []
+  let scoreInputs = [] // scoreInputs[h][pi]
+
+  function buildTable(round) {
+    tableCard.innerHTML = ''
+    const table = el('table')
+    const thead = el('thead')
+    thead.appendChild(
+      el('tr', {}, [
+        el('th', {}, ['Hole']),
+        ...round.players.map((p) => el('th', {}, [p.name])),
+        el('th', {}, ['Pot']),
+        el('th', {}, ['Skin']),
+      ])
+    )
+    table.appendChild(thead)
+
+    const tbody = el('tbody')
+    potCells = []
+    skinCells = []
+    scoreInputs = []
+
+    for (let h = 0; h < round.holeCount; h++) {
+      const tr = el('tr', {}, [el('td', {}, [String(h + 1)])])
+      const rowInputs = []
+
+      round.players.forEach((p, pi) => {
+        const td = el('td')
+        const value = getScore(round, h, pi)
+        const input = el('input', {
+          type: 'number',
+          min: '1',
+          class: 'score-input',
+          value: value != null ? String(value) : '',
+        })
+        input.oninput = () => {
+          const raw = input.value
+          const numeric = raw === '' ? null : Number(raw)
+          updateDoc(doc(db, 'rounds', code), { [`scores.${scoreKey(h, pi)}`]: numeric }).catch((err) => {
+            alert('Could not save score: ' + err.message)
+          })
+        }
+        rowInputs.push(input)
+        td.appendChild(input)
+        tr.appendChild(td)
+      })
+
+      const potCell = el('td', { style: 'color:#6b7280' })
+      const skinCell = el('td')
+      tr.appendChild(potCell)
+      tr.appendChild(skinCell)
+      potCells.push(potCell)
+      skinCells.push(skinCell)
+      scoreInputs.push(rowInputs)
+      tbody.appendChild(tr)
+    }
+    table.appendChild(tbody)
+    tableCard.appendChild(table)
+    built = true
+  }
+
+  function updateFromRound(round) {
+    headerCard.innerHTML = ''
+    headerCard.appendChild(el('h2', {}, [round.name]))
+    headerCard.appendChild(el('div', { class: 'meta' }, [`${round.holeCount} holes · $${round.skinValue}/skin`]))
+
+    codeCard.innerHTML = ''
+    codeCard.appendChild(
+      el('div', {}, [
+        el('div', { class: 'meta' }, ['Share this code so friends can join']),
+        el('div', { style: 'font-weight:900;font-size:22px;letter-spacing:3px' }, [round.code]),
+      ])
+    )
+    const copyBtn = el('button', { class: 'ghost-btn light' }, ['Copy'])
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(round.code)
+        copyBtn.textContent = 'Copied!'
+        setTimeout(() => { copyBtn.textContent = 'Copy' }, 1500)
+      } catch {
+        alert(`Round code: ${round.code}`)
+      }
+    }
+    codeCard.appendChild(copyBtn)
+
+    if (!built) buildTable(round)
+
+    round.players.forEach((p, pi) => {
+      for (let h = 0; h < round.holeCount; h++) {
+        const input = scoreInputs[h][pi]
+        if (document.activeElement === input) continue // don't clobber what the user is typing
+        const value = getScore(round, h, pi)
+        const strValue = value != null ? String(value) : ''
+        if (input.value !== strValue) input.value = strValue
+      }
+    })
+
     const holeResults = computeHoleResults(round)
     const standings = computeStandings(round, holeResults)
 
     standingsBody.innerHTML = ''
     standings.forEach((s) => {
       const netClass = s.net > 0 ? 'pos' : s.net < 0 ? 'neg' : 'zero'
-      standingsBody.appendChild(el('div', { class: 'standings-row' }, [
-        el('div', { class: 'player-name' }, [s.player.name]),
-        el('div', { class: 'stats' }, [
-          el('span', { class: 'skins-count' }, [`${s.skinsWon} skin${s.skinsWon === 1 ? '' : 's'}`]),
-          el('span', { class: `net ${netClass}` }, [money(s.net)]),
-        ]),
-      ]))
+      standingsBody.appendChild(
+        el('div', { class: 'standings-row' }, [
+          el('div', { class: 'player-name' }, [s.player.name]),
+          el('div', { class: 'stats' }, [
+            el('span', { class: 'skins-count' }, [`${s.skinsWon} skin${s.skinsWon === 1 ? '' : 's'}`]),
+            el('span', { class: `net ${netClass}` }, [money(s.net)]),
+          ]),
+        ])
+      )
     })
 
     holeResults.forEach((result, h) => {
@@ -354,9 +596,25 @@ function renderRound(round) {
       skinCells[h].textContent = winner ? winner.name : result.complete ? 'Carried' : '—'
       skinCells[h].className = winner ? 'skin-winner' : 'skin-carried'
     })
+
+    rememberRound(summaryOf(round))
   }
 
-  updateDerived()
+  unsubscribeActive = onSnapshot(
+    doc(db, 'rounds', code),
+    (snap) => {
+      if (!snap.exists()) {
+        alert('This round was deleted.')
+        forgetRound(code)
+        goHome()
+        return
+      }
+      updateFromRound(snap.data())
+    },
+    (err) => {
+      alert('Live connection lost: ' + err.message)
+    }
+  )
 }
 
 render()
