@@ -653,7 +653,7 @@ function mountRoundView(code) {
       const netClass = s.net > 0 ? 'pos' : s.net < 0 ? 'neg' : 'zero'
       const isLeader = i === 0 && hasClearLeader
       standingsBody.appendChild(
-        el('div', { class: 'standings-row' }, [
+        el('div', { class: `standings-row${isLeader ? ' leader' : ''}` }, [
           el('div', { class: 'player-identity' }, [
             avatarEl(s.player.name),
             el('div', { class: 'player-name' }, [isLeader ? '👑 ' : '', s.player.name]),
