@@ -107,6 +107,11 @@ main {
   color: var(--muted);
 }
 
+.finish-banner {
+  background: linear-gradient(135deg, #fdf0d5, var(--card));
+  border: 1px solid var(--sand);
+}
+
 button.primary {
   background: linear-gradient(180deg, var(--green), var(--green-dark));
   color: #fff;

@@ -104,8 +104,10 @@ function buildRound({ code, name, playerNames, holeCount, skinValue }) {
 /**
  * Walks the round hole by hole. Each player antes `skinValue` every hole.
  * A tie for low score carries the whole pot to the next hole; a solo low
- * score takes it. Net payouts across all players always sum to zero
- * (unless the round ends with an unresolved carry still on the table).
+ * score takes it. On the last hole there's nowhere left to carry to, so a
+ * tie there splits the pot evenly among whoever tied for low, instead of
+ * leaving money unresolved. Net payouts across all players always sum to
+ * zero.
  */
 function computeHoleResults(round) {
   const results = []
@@ -116,18 +118,22 @@ function computeHoleResults(round) {
     const pot = carryPot + round.skinValue * round.players.length
 
     if (!complete) {
-      results.push({ pot, winnerId: null, complete: false })
+      results.push({ pot, winnerId: null, splitIds: null, complete: false })
       continue
     }
 
     const min = Math.min(...round.players.map((_, i) => getScore(round, h, i)))
     const lowPlayers = round.players.filter((_, i) => getScore(round, h, i) === min)
+    const isLastHole = h === round.holeCount - 1
 
     if (lowPlayers.length === 1) {
-      results.push({ pot, winnerId: lowPlayers[0].id, complete: true })
+      results.push({ pot, winnerId: lowPlayers[0].id, splitIds: null, complete: true })
+      carryPot = 0
+    } else if (isLastHole) {
+      results.push({ pot, winnerId: null, splitIds: lowPlayers.map((p) => p.id), complete: true })
       carryPot = 0
     } else {
-      results.push({ pot, winnerId: null, complete: true })
+      results.push({ pot, winnerId: null, splitIds: null, complete: true })
       carryPot = pot
     }
   }
@@ -149,6 +155,9 @@ function computeStandings(round, holeResults) {
     if (result.winnerId) {
       net[result.winnerId] += result.pot
       skinsWon[result.winnerId] += 1
+    } else if (result.splitIds && result.splitIds.length > 0) {
+      const share = result.pot / result.splitIds.length
+      result.splitIds.forEach((id) => { net[id] += share })
     }
   })
 
@@ -158,8 +167,9 @@ function computeStandings(round, holeResults) {
 }
 
 function money(n) {
-  const sign = n > 0 ? '+' : n < 0 ? '−' : ''
-  return `${sign}$${Math.abs(n)}`
+  const rounded = Math.round(n * 100) / 100
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
+  return `${sign}$${Math.abs(rounded)}`
 }
 
 // ---- Avatars ----
@@ -597,6 +607,9 @@ function mountRoundView(code) {
   const codeCard = el('div', { class: 'card', style: 'display:flex;align-items:center;justify-content:space-between;gap:10px' })
   app.appendChild(codeCard)
 
+  const finishBanner = el('div', { class: 'card finish-banner', style: 'display:none;text-align:center' })
+  app.appendChild(finishBanner)
+
   const standingsCard = el('div', { class: 'card' })
   standingsCard.appendChild(el('div', { class: 'section-label' }, ['Standings']))
   const standingsBody = el('div')
@@ -610,8 +623,9 @@ function mountRoundView(code) {
   let potCells = []
   let skinCells = []
   let scoreButtons = [] // scoreButtons[h][pi]
-  let previousWinnerIds = [] // per hole, so we only confetti *new* skin winners
-  let firstSnapshot = true // don't confetti pre-existing winners on initial load
+  let previousResolutionKeys = [] // per hole, so we only confetti *newly* resolved skins
+  let firstSnapshot = true // don't confetti/celebrate pre-existing state on initial load
+  let wasComplete = false // tracks the round's previous completion state
 
   function buildTable(round) {
     tableCard.innerHTML = ''
@@ -734,17 +748,60 @@ function mountRoundView(code) {
 
     holeResults.forEach((result, h) => {
       const winner = round.players.find((p) => p.id === result.winnerId)
-      const hadWinnerBefore = previousWinnerIds[h] != null
+      const resolutionKey = result.winnerId || (result.splitIds && result.splitIds.length ? `split:${result.splitIds.join(',')}` : null)
+      const hadResolutionBefore = previousResolutionKeys[h] != null
       potCells[h].textContent = `$${result.pot}`
-      skinCells[h].textContent = winner ? winner.name : result.complete ? 'Carried' : '—'
-      skinCells[h].className = winner ? 'skin-winner' : 'skin-carried'
 
-      if (winner && !hadWinnerBefore && !firstSnapshot) {
+      if (winner) {
+        skinCells[h].textContent = winner.name
+        skinCells[h].className = 'skin-winner'
+      } else if (result.splitIds && result.splitIds.length > 0) {
+        const names = result.splitIds
+          .map((id) => round.players.find((p) => p.id === id)?.name)
+          .filter(Boolean)
+          .join(' & ')
+        skinCells[h].textContent = `Split · ${names}`
+        skinCells[h].className = 'skin-winner'
+      } else {
+        skinCells[h].textContent = result.complete ? 'Carried' : '—'
+        skinCells[h].className = 'skin-carried'
+      }
+
+      if (resolutionKey && !hadResolutionBefore && !firstSnapshot) {
         const rect = skinCells[h].getBoundingClientRect()
         burstConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2)
       }
-      previousWinnerIds[h] = result.winnerId
+      previousResolutionKeys[h] = resolutionKey
     })
+
+    const allHolesComplete = holeResults.length > 0 && holeResults.every((r) => r.complete)
+    const justFinished = allHolesComplete && !wasComplete && !firstSnapshot
+    wasComplete = allHolesComplete
+
+    if (allHolesComplete) {
+      const topNet = standings[0].net
+      const champions = standings.filter((s) => s.net === topNet)
+      const resultText = champions.length === 1
+        ? `${champions[0].player.name} wins the round!`
+        : `${champions.map((c) => c.player.name).join(' & ')} tie for the win!`
+      finishBanner.innerHTML = ''
+      finishBanner.appendChild(el('div', { style: 'font-size:32px;line-height:1' }, ['🏆']))
+      finishBanner.appendChild(el('div', { style: 'font-weight:900;font-size:18px;margin-top:6px' }, ['Round Complete!']))
+      finishBanner.appendChild(el('div', { style: 'font-weight:700;margin-top:4px' }, [resultText]))
+      finishBanner.style.display = 'block'
+    } else {
+      finishBanner.style.display = 'none'
+    }
+
+    if (justFinished) {
+      const rect = finishBanner.getBoundingClientRect()
+      const cx = rect.left + rect.width / 2
+      const cy = rect.top + rect.height / 2
+      ;[-0.3, -0.1, 0.1, 0.3].forEach((offset) => {
+        burstConfetti(cx + offset * window.innerWidth, cy)
+      })
+    }
+
     firstSnapshot = false
 
     rememberRound(summaryOf(round))
